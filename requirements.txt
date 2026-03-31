@@ -1,4 +1,4 @@
-google-adk==0.1.0
-google-genai
+google-generativeai
 fastapi
 uvicorn
+psycopg2-binary

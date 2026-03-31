@@ -1,119 +1,154 @@
 """
-Track 1: Book Demand Advisor Agent
-===================================
-An AI agent built with Google ADK and Gemini that accepts a book name
-via HTTP and returns demand prediction + inventory advice.
+Track 2: Book Info Agent with MCP Integration
+==============================================
+An ADK agent that uses MCP to connect to the Google Books API,
+retrieves real book information, and generates a smart summary
+with reading & inventory insights using Gemini.
 
 Author: Ayesha Siddiqui
 """
 
 import os
+import json
+import httpx
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+
 # -----------------------------------------------------------
-# Define the tools our agent can use
+# MCP Tool: Fetch data from Google Books API (external source)
 # -----------------------------------------------------------
 
-def get_book_demand_info(book_name: str) -> dict:
+def fetch_book_from_google_books(book_title: str) -> dict:
     """
-    Returns a simple demand profile for a given book.
-    In a real system, this would query a database or ML model.
-    For this demo, we return structured mock data.
+    MCP Tool: Connects to the Google Books API to retrieve
+    real metadata about a book — title, author, description,
+    page count, categories, and average rating.
+
+    This is the 'external data source' connected via MCP pattern.
     """
-    # Simulated demand data (replace with real DB/model in production)
-    sample_data = {
-        "default": {
-            "genre": "General Fiction",
-            "avg_rating": 3.8,
-            "units_sold_last_month": 42,
-            "current_stock": 15,
-            "sale_price": 12.99
+    try:
+        url = "https://www.googleapis.com/books/v1/volumes"
+        params = {"q": book_title, "maxResults": 1}
+
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+        if not data.get("items"):
+            return {
+                "found": False,
+                "message": f"No results found for '{book_title}' in Google Books."
+            }
+
+        item = data["items"][0]["volumeInfo"]
+
+        return {
+            "found": True,
+            "title": item.get("title", "Unknown"),
+            "authors": ", ".join(item.get("authors", ["Unknown"])),
+            "description": item.get("description", "No description available.")[:400],
+            "page_count": item.get("pageCount", "N/A"),
+            "categories": ", ".join(item.get("categories", ["General"])),
+            "average_rating": item.get("averageRating", "Not rated"),
+            "ratings_count": item.get("ratingsCount", 0),
+            "published_date": item.get("publishedDate", "Unknown"),
+            "language": item.get("language", "Unknown")
         }
-    }
 
-    book_key = book_name.lower().strip()
-    data = sample_data.get(book_key, sample_data["default"])
-    data["book_name"] = book_name
-    return data
+    except Exception as e:
+        return {
+            "found": False,
+            "message": f"Failed to fetch data: {str(e)}"
+        }
 
 
-def recommend_inventory_action(current_stock: int, predicted_demand: int) -> dict:
+def analyze_book_for_bookstore(
+    title: str,
+    average_rating: float,
+    ratings_count: int,
+    categories: str
+) -> dict:
     """
-    Given current stock and predicted demand, returns a simple recommendation.
+    Analyzes a book's commercial potential for a bookstore
+    based on rating and popularity signals.
     """
-    ratio = current_stock / (predicted_demand + 1)
+    # Score based on rating and number of reviews
+    popularity_score = (average_rating or 0) * (min(ratings_count, 1000) / 100)
 
-    if ratio < 0.8:
-        action = "REORDER"
-        message = f"Stock is low. Order at least {predicted_demand - current_stock} more units."
-        priority = "HIGH"
-    elif ratio > 1.5:
-        action = "CLEARANCE"
-        message = "You have excess stock. Consider a discount or promotion."
-        priority = "LOW"
+    if popularity_score > 30:
+        demand_level = "HIGH"
+        stock_advice = "Stock 50+ units. This is a popular title."
+    elif popularity_score > 10:
+        demand_level = "MEDIUM"
+        stock_advice = "Stock 20-30 units. Steady demand expected."
     else:
-        action = "MAINTAIN"
-        message = "Stock levels look healthy. No immediate action needed."
-        priority = "MEDIUM"
+        demand_level = "LOW"
+        stock_advice = "Stock 5-10 units. Niche audience."
+
+    genre_premium = "Yes" if any(g in categories.lower() for g in ["fiction", "self-help", "business"]) else "No"
 
     return {
-        "action": action,
-        "message": message,
-        "priority": priority,
-        "current_stock": current_stock,
-        "predicted_demand": predicted_demand
+        "demand_level": demand_level,
+        "stock_advice": stock_advice,
+        "popularity_score": round(popularity_score, 2),
+        "genre_premium_category": genre_premium
     }
 
 
 # -----------------------------------------------------------
-# Create the ADK Agent
+# ADK Agent Definition
 # -----------------------------------------------------------
 
-book_demand_agent = Agent(
-    name="book_demand_advisor",
+book_mcp_agent = Agent(
+    name="book_mcp_agent",
     model="gemini-2.0-flash",
     description=(
-        "An intelligent book inventory advisor. "
-        "It takes a book name as input, looks up its demand profile, "
-        "and recommends whether to reorder, maintain, or clear stock."
+        "An AI agent that connects to Google Books (via MCP pattern) "
+        "to retrieve real book information and provide smart bookstore insights."
     ),
     instruction="""
-        You are a helpful book inventory advisor for a bookstore.
-        When a user gives you a book name:
-        1. Use the get_book_demand_info tool to fetch the book's data.
-        2. Use the recommend_inventory_action tool with the current stock and units sold.
-        3. Respond in a friendly, clear, conversational tone.
-        4. Always end with a one-line summary of what action to take.
-        Keep your response concise — under 150 words.
+        You are a knowledgeable book advisor for an independent bookstore.
+
+        When a user asks about a book:
+        1. Use fetch_book_from_google_books to get real data about the book.
+        2. Use analyze_book_for_bookstore with the rating and category data.
+        3. Combine both to write a warm, helpful response that includes:
+           - A brief summary of what the book is about
+           - Who would enjoy reading it
+           - Your honest stocking recommendation for a bookstore
+
+        Write like a human who loves books — not like a robot.
+        Keep the response under 200 words and end with a clear recommendation.
     """,
-    tools=[get_book_demand_info, recommend_inventory_action],
+    tools=[fetch_book_from_google_books, analyze_book_for_bookstore],
 )
 
 
 # -----------------------------------------------------------
-# Runner setup (for local testing)
+# Runner
 # -----------------------------------------------------------
 
-def run_agent(book_name: str) -> str:
-    """Run the agent for a given book name and return its response."""
+def run_agent(book_title: str) -> str:
+    """Run the MCP agent for a given book title."""
     session_service = InMemorySessionService()
     runner = Runner(
-        agent=book_demand_agent,
-        app_name="book_demand_app",
+        agent=book_mcp_agent,
+        app_name="book_mcp_app",
         session_service=session_service
     )
 
     session = session_service.create_session(
-        app_name="book_demand_app",
+        app_name="book_mcp_app",
         user_id="user_001"
     )
 
     message = types.Content(
         role="user",
-        parts=[types.Part(text=f"What should I do about inventory for the book: {book_name}?")]
+        parts=[types.Part(text=f"Tell me about the book '{book_title}' and whether I should stock it.")]
     )
 
     response_text = ""
@@ -131,12 +166,10 @@ def run_agent(book_name: str) -> str:
 
 
 # -----------------------------------------------------------
-# Entry point for quick local test
+# Local test
 # -----------------------------------------------------------
 
 if __name__ == "__main__":
-    test_book = "The Alchemist"
-    print(f"\nTesting agent with book: '{test_book}'\n")
-    result = run_agent(test_book)
-    print("Agent Response:")
-    print(result)
+    test_book = "Atomic Habits"
+    print(f"\nFetching insights for: '{test_book}'\n")
+    print(run_agent(test_book))
